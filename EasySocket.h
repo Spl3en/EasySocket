@@ -60,13 +60,8 @@
 #define EasySocket_H_INCLUDED
 
 /* Includes */
-#include "../Ztring/Ztring.h"
+#include "Ztring/Ztring.h"
 #include <windows.h>
-
-#define ES_ERROR_BIND       ((void*)-1)
-#define ES_ERROR_LISTEN     ((void*)-2)
-#define ES_ERROR_CONNECT    ((void*)-3)
-#define ES_ERROR_MALLOC     ((void*)-4)
 
 // Working Macros
 #define _es_get_data(esl) \
@@ -91,10 +86,12 @@ typedef
 struct _EasySocket
 {
     SOCKET sock;
-    int is_connected;
+    bool is_connected;
 
     char *hostname;
     char *ip;
+
+    HANDLE abortEvent;
 
 }	EasySocket;
 
@@ -104,7 +101,7 @@ struct _EasySocketListened
     SOCKET sock;
     HANDLE thread;
 
-    int is_connected;
+    bool is_connected;
     char *buffer;
     int bsize;
 
@@ -144,7 +141,7 @@ int
 es_init(void);
 
 EasySocketListened *
-es_accept(EasySocket *server, int buffer_size_allocated);
+es_accept(EasySocket *server, int buffer_size_allocated, bool abortable);
 
 void
 es_listener (EasySocketListened *esl, void (*recv_callback)(EasySocketListened *sock), void (*finish_callback)(EasySocketListened *sock));
@@ -152,11 +149,14 @@ es_listener (EasySocketListened *esl, void (*recv_callback)(EasySocketListened *
 char *
 es_get_ip_from_hostname (char *addr);
 
-void
-es_send(EasySocket *es, char *msg, int len);
+int
+es_send(EasySocket *es, void *msg, int len);
 
 unsigned char *
 es_recv (EasySocket *es, int *_out_size);
+
+bool
+es_recv_buffer (EasySocket *es, void *data, int sizeData);
 
 void
 es_set_timeout (EasySocket *es, long int milliseconds);
@@ -176,21 +176,8 @@ _es_func_set_data (EasySocketListened *esl, void *data);
 void
 es_set_connected (EasySocket *es, int is_connected);
 
-void
-es_http_answer_request (EasySocket *es, char *msg);
-
-void
-es_http_send_request (EasySocket *es, char *method, char *additionnal_headers, char *data, char *path);
-
-char *
-es_http_get (EasySocket *es, char *path);
-
-char *
-es_http_get_contents (EasySocket *es, char *path);
-
-char *
-es_http_wait_for_answer (EasySocket *es);
-
+int
+es_set_blocking (EasySocket *es, bool blocking);
 
 	/**=================
 		@Destructors

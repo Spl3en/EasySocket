@@ -70,7 +70,6 @@ _ex_es_listener (EasySocketListenerArgs *esla)
     }
 
     _finish_callback(esl);
-    CloseHandle(esl->thread);
 }
 
 /* Public Methods */
@@ -83,7 +82,7 @@ esla_new(EasySocketListened *esl, void (*callback)(), void (*finish_callback)())
 {
     EasySocketListenerArgs *esla = NULL;
     if ((esla = malloc(sizeof(EasySocketListenerArgs))) == NULL)
-        return ES_ERROR_MALLOC;
+        return NULL;
 
     esla->esl = esl;
     esla->callback = callback;
@@ -106,7 +105,7 @@ es_server_new (int port, int max_connection)
     int csin_size = sizeof(csin);
 
 	if ((p = (EasySocket *) malloc (sizeof(EasySocket))) == NULL)
-		return ES_ERROR_MALLOC;
+		return NULL;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
     assert (sock != INVALID_SOCKET);
@@ -116,15 +115,38 @@ es_server_new (int port, int max_connection)
     server_context.sin_port        = htons(port);
 
     if (bind(sock, (SOCKADDR*)&server_context, csin_size) == SOCKET_ERROR)
-        return ES_ERROR_BIND;
+        return NULL;
 
     if (listen(sock, max_connection) == SOCKET_ERROR)
-        return ES_ERROR_LISTEN;
+        return NULL;
 
     p->sock = sock;
     p->is_connected = 1;
+	p->abortEvent = NULL;
 
     return p;
+}
+
+int
+es_set_blocking (EasySocket *es, bool blocking)
+{
+	SOCKET sock = es->sock;
+
+	// Set non blocking
+	#ifdef WIN32
+		unsigned long on = (blocking) ? 0 : 1;
+		if (0 != ioctlsocket (sock, FIONBIO, &on))
+			return -1;
+	#else
+		int flags = fcntl (sock, F_GETFL, 0);
+		if (flags < 0)
+			return -1;
+		flags = blocking ? (flags&~O_NONBLOCK) : (flags|O_NONBLOCK);
+		if (fcntl (sock, F_SETFL, flags) != 0)
+			return -1;
+	#endif
+
+	return 0;
 }
 
 EasySocket *
@@ -141,7 +163,7 @@ es_client_new_from_ip (char *ip, int port)
     int csin_size = sizeof(csin);
 
 	if ((p = (EasySocket *) malloc (sizeof(EasySocket))) == NULL)
-		return ES_ERROR_MALLOC;
+		return NULL;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
     assert (sock != INVALID_SOCKET);
@@ -151,7 +173,7 @@ es_client_new_from_ip (char *ip, int port)
     server_context.sin_port        = htons (port);
 
     if (connect(sock, (SOCKADDR*)&server_context, csin_size) == SOCKET_ERROR)
-        return ES_ERROR_CONNECT;
+        return NULL;
 
     p->sock = sock;
     p->is_connected = 1;
@@ -170,10 +192,9 @@ es_client_new_from_host (char *hostname, int port)
     EasySocket *p = NULL;
     char *ip = NULL;
 
-    if ((ip = es_get_ip_from_hostname(hostname)) == NULL)
-    {
+    if ((ip = es_get_ip_from_hostname(hostname)) == NULL) {
         printf("[!] Cannot connect to %s:%d.\n", hostname, port);
-        return ES_ERROR_MALLOC;
+        return NULL;
     }
 
     p = es_client_new_from_ip(ip, port);
@@ -234,23 +255,27 @@ es_init()
 
 
 EasySocketListened *
-es_accept(EasySocket *server, int buffer_size_allocated)
+es_accept (EasySocket *server, int buffer_size_allocated, bool abortable)
 {
     SOCKET sock;
     SOCKADDR_IN csin;
     int csin_size = sizeof(csin);
     EasySocketListened *esl = NULL;
 
-    sock = accept(server->sock, (SOCKADDR *) &csin, &csin_size);
+	if (abortable) {
+		server->abortEvent = CreateEvent (NULL, TRUE, FALSE, NULL);
+	}
 
-    if (sock == INVALID_SOCKET)
+    sock = accept (server->sock, (SOCKADDR *) &csin, &csin_size);
+
+    if (sock == (unsigned) SOCKET_ERROR)
         return NULL;
 
     if ((esl = malloc(sizeof(EasySocketListened))) == NULL)
         return NULL;
 
     esl->sock         = sock;
-    esl->is_connected = 1;
+    esl->is_connected = true;
     esl->buffer       = str_malloc_clear(buffer_size_allocated);
     esl->bsize        = buffer_size_allocated;
     esl->_data        = NULL;
@@ -270,7 +295,7 @@ es_get_ip_from_hostname (char *addr)
 }
 
 void
-es_set_connected(EasySocket *es, int is_connected)
+es_set_connected (EasySocket *es, int is_connected)
 {
     es->is_connected = is_connected;
 }
@@ -283,13 +308,13 @@ es_listener (EasySocketListened *esl, void (*recv_callback)(EasySocketListened *
     esl->thread = CreateThread(NULL, 0, (void*)_ex_es_listener, esla, 0, NULL);
 }
 
-void
-es_send(EasySocket *es, char *msg, int len)
+int
+es_send (EasySocket *es, void *msg, int len)
 {
     if (len == -1)
         len = strlen(msg);
 
-    send(es->sock, msg, len, 0);
+    return send(es->sock, msg, len, 0);
 }
 
 void
@@ -303,117 +328,6 @@ es_set_timeout (EasySocket *es, long int milliseconds)
     setsockopt(es->sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(struct timeval));
 }
 
-char *
-es_http_get_contents (EasySocket *es, char *path)
-{
-    char *page     = es_http_get(es, path);
-    int pos        = str_pos_after (page, "\r\n\r\n");
-    char *contents = strdup(&page[pos]);
-
-    free(page);
-    return contents;
-}
-
-char *
-es_http_get (EasySocket *es, char *path)
-{
-    char *host = (es->hostname != NULL) ? es->hostname : es->ip;
-	char *full_msg = str_dup_printf(
-		"GET %s HTTP/1.1\r\n"
-		"Host: %s\r\n"
-		"User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; rv:24.0) Gecko/20100101 Firefox/42.0\r\n"
-		"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
-        "Accept-Encoding: deflate\r\n"
-        "Connection: close\r\n"
-		"\r\n\r\n",
-		path, host
-    );
-
-    es_send(es, full_msg, -1);
-    free(full_msg);
-
-    int size;
-    unsigned char *answer = es_recv(es, &size);
-
-    if (answer != NULL)
-        answer[size-1] = '\0';
-    else
-        answer = es_http_wait_for_answer(es);
-
-    return answer;
-}
-
-
-char *
-es_http_wait_for_answer (EasySocket *es)
-{
-    char *answer = NULL;
-
-    while (answer == NULL)
-    {
-        int size;
-        answer = es_recv(es, &size);
-
-        if (answer != NULL)
-            answer[size-1] = '\0';
-    }
-
-    return answer;
-}
-
-void
-es_http_send_request (EasySocket *es, char *method, char *additionnal_headers, char *data, char *path)
-{
-    char *full_msg = str_dup_printf(
-
-        "%s %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; rv:26.0) Gecko/20100101 Firefox/26.0\r\n"
-        "Content-Type: application/x-www-form-urlencoded\r\n"
-        "%s" // dynamic content-length only if method == POST
-        "%s"
-        "\r\n"
-        "%s",
-
-        method, path,
-        es->hostname,
-        (str_equals(method, "POST")) ?
-                (str_dup_printf("Content-Length: %d\r\n",
-                        (data) ?
-                                strlen(data)
-                            :   0
-                ))
-            :   "",
-        (additionnal_headers) ? additionnal_headers : "",
-        (data) ? data : ""
-    );
-
-    es_send(es, full_msg, -1);
-
-    free(full_msg);
-}
-
-void
-es_answer_http_request(EasySocket *es, char *msg)
-{
-    char *full_msg = str_dup_printf(
-        "HTTP/1.1 200 OK\r\n"
-        "Date: Mon, 23 May 2005 22:38:34 GMT\r\n"
-        "Server: Apache/1.3.3.7 (Unix) (Red-Hat/Linux)\r\n"
-        "Last-Modified: Wed, 31 Nov 3373 31:33:73 GMT\r\n"
-        "Etag: \"3f80f-1b6-3e1cb03b\"\r\n"
-        "Accept-Ranges: bytes\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-        strlen(msg) + 1,
-		msg
-    );
-
-    es_send(es, full_msg, -1);
-
-    free(full_msg);
-}
 
 unsigned char *
 es_recv (EasySocket *es, int *_out_size)
@@ -423,12 +337,17 @@ es_recv (EasySocket *es, int *_out_size)
 	unsigned int total_bytes = 0;
 	BbQueue msg_recved = bb_queue_local_decl();
 
-    while ((bytes = recv(es->sock, data, (sizeof data) - 1, 0)) > 0)
-    {
+    do {
+    	if ((bytes = recv (es->sock, data, (sizeof data) - 1, 0)) <= 0) {
+			// Server disconnected
+			break;
+    	}
+
         Buffer *buffer = buffer_new_from_ptr(data, bytes);
         bb_queue_add(&msg_recved, buffer);
         total_bytes += bytes;
-    }
+
+    } while (bytes == sizeof(data));
 
     *_out_size = total_bytes;
 
@@ -446,6 +365,19 @@ es_recv (EasySocket *es, int *_out_size)
     }
 
     return response;
+}
+
+bool
+es_recv_buffer (EasySocket *es, void *data, int sizeData)
+{
+	int bytes = recv (es->sock, data, sizeData, 0);
+
+	if (bytes <= 0 || bytes > sizeData) {
+		// Server disconnected or data too long
+		return false;
+	}
+
+	return true;
 }
 
 int
